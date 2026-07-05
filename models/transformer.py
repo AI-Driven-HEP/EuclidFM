@@ -1,28 +1,23 @@
 """
-Transformer model for photometry time series - CORRECTED VERSION
-Correct sequence: Embedding → Mask → Encoder → Restore → Decoder
+Transformer model for photometry time series - MAE-style
+Sequence: Embedding → Encoder → Mask → Decoder → Prediction
 """
 import logging
 import torch
 import torch.nn as nn
 from .embedding import PhotometryEmbedding
-from .masking import random_masking_embeddings
+from .masking import apply_mask_fixed
 
 logger = logging.getLogger(__name__)
 
 
 class PhotometryTransformer(nn.Module):
     """
-    Transformer model with correct masking sequence:
-    1. Embedding → Convert raw measurements to embeddings
-    2. Random Masking → Remove tokens from valid positions
-    3. Encoder → Process unmasked tokens
-    4. Restore → Put tokens back with mask tokens
-    5. Decoder → Reconstruct all tokens
+    Transformer model with MAE-style masking (mask AFTER encoder).
     """
     def __init__(self, cfg, n_band, n_survey, n_type):
         super().__init__()
-        logger.info("Initializing Transformer with correct masking sequence...")
+        logger.info("Initializing Transformer with MAE-style masking...")
         logger.info(f"CLS token enabled: {cfg.use_cls_token}")
         logger.info(f"Global features dimension: {cfg.global_features}")
         logger.info(f"Using separate paths for flux and error")
@@ -31,6 +26,7 @@ class PhotometryTransformer(nn.Module):
         self.seq_len = cfg.seq_len
         self.d_model = cfg.d_model
         self.use_cls_token = cfg.use_cls_token
+        self.num_mask = cfg.num_mask
         
         # 1. Embedding layer
         self.embedding = PhotometryEmbedding(
@@ -41,10 +37,10 @@ class PhotometryTransformer(nn.Module):
             max_len=cfg.seq_len, 
             use_global=True, 
             global_dim=cfg.global_features,
-            use_cls_token=False  # CLS token will be added separately
+            use_cls_token=False
         )
         
-        # 2. Encoder
+        # 2. Encoder (processes ALL tokens)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.d_model, 
             nhead=cfg.n_heads, 
@@ -56,7 +52,6 @@ class PhotometryTransformer(nn.Module):
         self.encoder_norm = nn.LayerNorm(cfg.d_model)
         
         # 3. Decoder
-        self.decoder_embed = nn.Linear(cfg.d_model, cfg.d_model)
         decoder_layer = nn.TransformerDecoderLayer(
             d_model=cfg.d_model,
             nhead=cfg.n_heads,
@@ -67,7 +62,7 @@ class PhotometryTransformer(nn.Module):
         self.decoder = nn.TransformerDecoder(decoder_layer, cfg.n_layers)
         self.decoder_norm = nn.LayerNorm(cfg.d_model)
         
-        # 4. Mask token for decoder
+        # 4. Mask token
         self.mask_token = nn.Parameter(torch.zeros(1, 1, cfg.d_model))
         nn.init.normal_(self.mask_token, std=0.02)
         
@@ -94,78 +89,57 @@ class PhotometryTransformer(nn.Module):
         logger.info("Model ready.")
 
     def forward(self, values, band, survey, type_id, global_feat, valid_mask):
-        """
-        Forward pass with correct masking sequence.
-        
-        Sequence:
-        1. Embedding → (B, L, D)
-        2. Random Masking → Remove tokens based on mask_ratio
-        3. Encoder → Process unmasked tokens
-        4. Restore + Mask Tokens → Fill removed positions
-        5. Decoder → Reconstruct all positions
-        6. Prediction → Predict original values
-        
-        Args:
-            values: (B, L, 2) - [flux, error]
-            band: (B, L) - band IDs
-            survey: (B, L) - survey IDs
-            type_id: (B, L) - type IDs
-            global_feat: (B, global_dim) - global features
-            valid_mask: (B, L) - True where measurement is valid
-        
-        Returns:
-            pred: (B, L, 2) - predicted [flux, error]
-            cls_token: (B, d_model) - CLS token for downstream tasks
-            mask: (B, L) - Binary mask (1=masked, 0=kept)
-        """
         B, L, _ = values.shape
         device = values.device
         
         # ========== STEP 1: EMBEDDING ==========
-        x = self.embedding(values, band, survey, type_id, global_feat)  # (B, L, D)
+        x = self.embedding(values, band, survey, type_id, global_feat)
         
-        # ========== STEP 2: RANDOM MASKING ==========
-        # Apply masking to valid positions only
-        mask_ratio = self.cfg.num_mask / self.seq_len        x_masked, mask, ids_keep, ids_shuffle = random_masking_embeddings(x, mask_ratio)
-        # x_masked: (B, N_keep, D) - only unmasked tokens
-        # mask: (B, L) - 1=masked, 0=kept
-        # ids_keep: (B, N_keep) - indices of kept tokens
-        # ids_shuffle: (B, L) - shuffled indices for restoration
+        # ========== STEP 2: ENCODER (ALL TOKENS - NO MASKING) ==========
+        src_key_padding_mask = ~valid_mask
+        x_encoded = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
+        x_encoded = self.encoder_norm(x_encoded)
         
-        # ========== STEP 3: ENCODER ==========
-        # Create padding mask for valid positions
-        valid_mask_keep = valid_mask.gather(dim=1, index=ids_keep)
-        src_key_padding_mask = ~valid_mask_keep
+        # ========== STEP 3: MASKING (AFTER ENCODER) ==========
+        mask_positions = apply_mask_fixed(valid_mask, num_mask=self.num_mask)
         
-        # Pass through encoder
-        x_encoded = self.encoder(x_masked, src_key_padding_mask=src_key_padding_mask)
-        x_encoded = self.encoder_norm(x_encoded)  # (B, N_keep, D)
+        # Get indices of kept and removed tokens
+        ids_keep_list = []
+        ids_shuffle_list = []
+        for i in range(B):
+            all_ids = torch.arange(L, device=device)
+            mask_bool = mask_positions[i]
+            
+            ids_keep = all_ids[~mask_bool]
+            ids_remove = all_ids[mask_bool]
+            ids_shuffle = torch.cat([ids_keep, ids_remove], dim=0)
+            
+            ids_keep_list.append(ids_keep)
+            ids_shuffle_list.append(ids_shuffle)
+        
+        # Create masked version for decoder memory
+        max_keep = max([len(ids) for ids in ids_keep_list])
+        x_masked = torch.zeros(B, max_keep, self.d_model, device=device)
+        for i in range(B):
+            if len(ids_keep_list[i]) > 0:
+                x_masked[i, :len(ids_keep_list[i])] = x_encoded[i, ids_keep_list[i]]
         
         # ========== STEP 4: RESTORE + MASK TOKENS ==========
-        # Prepare for decoder: need to restore full sequence
-        # Create tensor with mask tokens for all positions
-        mask_tokens = self.mask_token.repeat(B, L, 1)  # (B, L, D)
-        
-        # Fill in encoded tokens at their original positions
-        # First, scatter encoded tokens back to their positions
+        mask_tokens = self.mask_token.repeat(B, L, 1)
         x_restored = mask_tokens.clone()
-        # Use scatter to place encoded tokens at their keep positions
-        for b in range(B):
-            x_restored[b, ids_keep[b]] = x_encoded[b]
+        for i in range(B):
+            if len(ids_keep_list[i]) > 0:
+                x_restored[i, ids_keep_list[i]] = x_encoded[i, ids_keep_list[i]]
         
         # Restore original ordering
-        ids_restore = torch.argsort(ids_shuffle, dim=1)
-        x_restored = torch.gather(
-            x_restored, 
-            dim=1, 
-            index=ids_restore.unsqueeze(-1).expand(-1, -1, self.d_model)
-        )
+        ids_restore_list = [torch.argsort(ids_shuffle, dim=0) for ids_shuffle in ids_shuffle_list]
+        for i in range(B):
+            ids_restore = ids_restore_list[i]
+            x_restored[i] = x_restored[i, ids_restore]
         
         # ========== STEP 5: DECODER ==========
-        # Create padding mask for decoder
         tgt_key_padding_mask = ~valid_mask
         
-        # Add CLS token if enabled
         if self.use_cls_token:
             cls = self.cls_token.expand(B, 1, -1)
             g = self.global_proj(global_feat)
@@ -178,30 +152,26 @@ class PhotometryTransformer(nn.Module):
         else:
             x_decoder_input = x_restored
         
-        # Decoder self-attention uses x_decoder_input
-        # Cross-attention uses x_encoded (or x_masked) from encoder
         x_decoded = self.decoder(
             tgt=x_decoder_input,
             memory=x_masked,
             tgt_key_padding_mask=tgt_key_padding_mask,
-            memory_key_padding_mask=~valid_mask_keep
+            memory_key_padding_mask=None
         )
         x_decoded = self.decoder_norm(x_decoded)
         
         # ========== STEP 6: PREDICTION ==========
         if self.use_cls_token:
-            # Remove CLS token for prediction
-            x_for_pred = x_decoded[:, 1:, :]  # (B, L, D)
-            cls_token = x_decoded[:, 0, :]    # (B, D)
+            x_for_pred = x_decoded[:, 1:, :]
+            cls_token = x_decoded[:, 0, :]
         else:
             x_for_pred = x_decoded
-            cls_token = x_decoded.mean(dim=1)  # (B, D)
+            cls_token = x_decoded.mean(dim=1)
         
-        # Predict flux and error
-        pred = self.pred_head(x_for_pred)  # (B, L, 2)
+        pred = self.pred_head(x_for_pred)
+        mask = mask_positions.float()
         
         return pred, cls_token, mask
     
     def reconstruct(self, values, band, survey, type_id, global_feat, valid_mask):
-        """Reconstruction with fixed masking."""
         return self.forward(values, band, survey, type_id, global_feat, valid_mask)
