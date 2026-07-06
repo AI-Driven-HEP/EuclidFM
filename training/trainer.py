@@ -1,10 +1,10 @@
 """
-Training loop - CORRECTED VERSION
+Training loop
 """
 import logging
 import torch
 from tqdm import tqdm
-from models.masking import reconstruction_loss
+from models.masking import apply_mask_fixed, reconstruction_loss
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +19,7 @@ class Trainer:
         self.best_model_path = best_model_path
         self.best_val_loss = float('inf')
     
-    def train_epoch(self, train_loader):
+    def train_epoch(self, train_loader, num_mask=20):
         """Run one training epoch."""
         self.model.train()
         train_loss = 0.0
@@ -33,9 +33,12 @@ class Trainer:
             valid_mask = batch["valid_mask"].to(self.device)
             global_feat = batch["global_features"].to(self.device)
 
-            # Forward pass with correct masking sequence
-            pred, _, mask = self.model(values, band, survey, type_id, global_feat, valid_mask)
-            loss = reconstruction_loss(pred, values, mask, valid_mask)
+            # Use fixed masking: 20 masks per sample
+            mask_positions = apply_mask_fixed(valid_mask, num_mask=num_mask)
+            
+            # Forward pass
+            pred, _ = self.model(values, band, survey, type_id, global_feat, valid_mask, mask_positions)
+            loss = reconstruction_loss(pred, values, mask_positions, valid_mask)
 
             if torch.isnan(loss):
                 logger.warning("NaN loss detected, skipping batch")
@@ -51,7 +54,7 @@ class Trainer:
 
         return train_loss / max(train_batches, 1)
     
-    def validate_epoch(self, val_loader):
+    def validate_epoch(self, val_loader, num_mask=20):
         """Run one validation epoch."""
         self.model.eval()
         val_loss = 0.0
@@ -66,8 +69,11 @@ class Trainer:
                 valid_mask = batch["valid_mask"].to(self.device)
                 global_feat = batch["global_features"].to(self.device)
 
-                pred, _, mask = self.model(values, band, survey, type_id, global_feat, valid_mask)
-                loss = reconstruction_loss(pred, values, mask, valid_mask)
+                # Use fixed masking for validation as well
+                mask_positions = apply_mask_fixed(valid_mask, num_mask=num_mask)
+                
+                pred, _ = self.model(values, band, survey, type_id, global_feat, valid_mask, mask_positions)
+                loss = reconstruction_loss(pred, values, mask_positions, valid_mask)
 
                 if not torch.isnan(loss):
                     val_loss += loss.item()
@@ -75,7 +81,7 @@ class Trainer:
 
         return val_loss / max(val_batches, 1)
     
-    def train(self, train_loader, val_loader, epochs, model_save_path=None):
+    def train(self, train_loader, val_loader, epochs, model_save_path=None, num_mask=20):
         """Full training loop."""
         train_losses = []
         val_losses = []
@@ -83,11 +89,11 @@ class Trainer:
         for epoch in range(epochs):
             logger.info(f"========== EPOCH {epoch+1}/{epochs} ==========")
             
-            avg_train_loss = self.train_epoch(train_loader)
+            avg_train_loss = self.train_epoch(train_loader, num_mask=num_mask)
             train_losses.append(avg_train_loss)
             logger.info(f"Train Loss: {avg_train_loss:.6f}")
             
-            avg_val_loss = self.validate_epoch(val_loader)
+            avg_val_loss = self.validate_epoch(val_loader, num_mask=num_mask)
             val_losses.append(avg_val_loss)
             logger.info(f"Validation Loss: {avg_val_loss:.6f}")
             
