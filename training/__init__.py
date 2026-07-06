@@ -1,1 +1,3 @@
-from .trainer import Trainer, reconstruction_loss
+from .trainer import Trainer
+
+__all__ = ['Trainer']
