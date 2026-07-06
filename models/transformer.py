@@ -1,28 +1,29 @@
 """
-Photometry Transformer model
+Transformer model for photometry time series - MAE-style with FIXED masking
+Sequence: Embedding → Encoder → Mask → Decoder → Prediction
 """
 import logging
 import torch
 import torch.nn as nn
 from .embedding import PhotometryEmbedding
+from .masking import apply_mask_fixed
 
 logger = logging.getLogger(__name__)
 
 
 class PhotometryTransformer(nn.Module):
-    """
-    Transformer model for photometry time series with masked autoencoding.
-    
-    Uses separate embedding paths for flux and error to improve error reconstruction.
-    Decoder is implemented as an MLP with at least 3 layers.
-    """
     def __init__(self, cfg, n_band, n_survey, n_type):
         super().__init__()
-        logger.info("Initializing Transformer...")
-        logger.info(f"CLS token enabled: {cfg.use_cls_token}")
-        logger.info(f"Global features dimension: {cfg.global_features}")
-        logger.info(f"Using separate paths for flux and error")
+        logger.info("Initializing Transformer with MAE-style masking...")
+        logger.info(f"Fixed masking: {cfg.num_mask} masks per sample")  # ✅ لاگ جدید
         
+        self.cfg = cfg
+        self.seq_len = cfg.seq_len
+        self.d_model = cfg.d_model
+        self.use_cls_token = cfg.use_cls_token
+        self.num_mask = cfg.num_mask  # ✅ 20
+        
+        # 1. Embedding layer (NO masking inside)
         self.embedding = PhotometryEmbedding(
             d_model=cfg.d_model, 
             n_band=n_band, 
@@ -31,9 +32,10 @@ class PhotometryTransformer(nn.Module):
             max_len=cfg.seq_len, 
             use_global=True, 
             global_dim=cfg.global_features,
-            use_cls_token=cfg.use_cls_token
+            use_cls_token=False
         )
         
+        # 2. Encoder (processes ALL tokens)
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.d_model, 
             nhead=cfg.n_heads, 
@@ -42,10 +44,35 @@ class PhotometryTransformer(nn.Module):
             batch_first=True
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, cfg.n_layers)
-        self.norm = nn.LayerNorm(cfg.d_model)
+        self.encoder_norm = nn.LayerNorm(cfg.d_model)
         
-        # Decoder as MLP with 3 layers
-        self.decoder = nn.Sequential(
+        # 3. Decoder
+        decoder_layer = nn.TransformerDecoderLayer(
+            d_model=cfg.d_model,
+            nhead=cfg.n_heads,
+            dim_feedforward=cfg.ff_dim,
+            dropout=cfg.dropout,
+            batch_first=True
+        )
+        self.decoder = nn.TransformerDecoder(decoder_layer, cfg.n_layers)
+        self.decoder_norm = nn.LayerNorm(cfg.d_model)
+        
+        # 4. Mask token
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, cfg.d_model))
+        nn.init.normal_(self.mask_token, std=0.02)
+        
+        # 5. CLS token
+        if self.use_cls_token:
+            self.cls_token = nn.Parameter(torch.zeros(1, 1, cfg.d_model))
+            nn.init.normal_(self.cls_token, std=0.02)
+            self.global_proj = nn.Sequential(
+                nn.Linear(cfg.global_features, cfg.d_model),
+                nn.GELU(),
+                nn.Linear(cfg.d_model, cfg.d_model)
+            )
+        
+        # 6. Prediction head (3-layer MLP)
+        self.pred_head = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_model * 2),
             nn.GELU(),
             nn.Dropout(0.1),
@@ -54,47 +81,90 @@ class PhotometryTransformer(nn.Module):
             nn.Linear(cfg.d_model, 2)
         )
         
-        self.use_cls_token = cfg.use_cls_token
         logger.info("Model ready.")
 
-    def forward(self, values, band, survey, type_id, global_feat, valid_mask, mask_positions):
-        """
-        Forward pass with correct key padding mask.
+    def forward(self, values, band, survey, type_id, global_feat, valid_mask):
+        B, L, _ = values.shape
+        device = values.device
         
-        Args:
-            values: (B, L, 2) - [flux, error] after arcsinh
-            band: (B, L) - band IDs
-            survey: (B, L) - survey IDs
-            type_id: (B, L) - type IDs
-            global_feat: (B, global_dim) - global features
-            valid_mask: (B, L) - True where measurement is valid
-            mask_positions: (B, L) - True where to mask (for training)
+        # ========== STEP 1: EMBEDDING ==========
+        x = self.embedding(values, band, survey, type_id, global_feat)
         
-        Returns:
-            pred: (B, L, 2) - predicted [flux, error]
-            cls: (B, d_model) - CLS token for downstream tasks
-        """
-        B = values.shape[0]
-        x = self.embedding(values, band, survey, type_id, global_feat, mask_positions)
+        # ========== STEP 2: ENCODER (ALL TOKENS - NO MASKING) ==========
+        src_key_padding_mask = ~valid_mask
+        x_encoded = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
+        x_encoded = self.encoder_norm(x_encoded)
+        
+        # ========== STEP 3: FIXED MASKING (AFTER ENCODER) ==========
+        # ✅ استفاده از apply_mask_fixed به جای random_masking_embeddings
+        mask_positions = apply_mask_fixed(valid_mask, num_mask=self.num_mask)
+        
+        # Get indices of kept and removed tokens
+        ids_keep_list = []
+        ids_shuffle_list = []
+        for i in range(B):
+            all_ids = torch.arange(L, device=device)
+            mask_bool = mask_positions[i]
+            
+            ids_keep = all_ids[~mask_bool]
+            ids_remove = all_ids[mask_bool]
+            ids_shuffle = torch.cat([ids_keep, ids_remove], dim=0)
+            
+            ids_keep_list.append(ids_keep)
+            ids_shuffle_list.append(ids_shuffle)
+        
+        # Create masked version for decoder memory
+        max_keep = max([len(ids) for ids in ids_keep_list])
+        x_masked = torch.zeros(B, max_keep, self.d_model, device=device)
+        for i in range(B):
+            if len(ids_keep_list[i]) > 0:
+                x_masked[i, :len(ids_keep_list[i])] = x_encoded[i, ids_keep_list[i]]
+        
+        # ========== STEP 4: RESTORE + MASK TOKENS ==========
+        mask_tokens = self.mask_token.repeat(B, L, 1)
+        x_restored = mask_tokens.clone()
+        for i in range(B):
+            if len(ids_keep_list[i]) > 0:
+                x_restored[i, ids_keep_list[i]] = x_encoded[i, ids_keep_list[i]]
+        
+        # Restore original ordering
+        ids_restore_list = [torch.argsort(ids_shuffle, dim=0) for ids_shuffle in ids_shuffle_list]
+        for i in range(B):
+            ids_restore = ids_restore_list[i]
+            x_restored[i] = x_restored[i, ids_restore]
+        
+        # ========== STEP 5: DECODER ==========
+        tgt_key_padding_mask = ~valid_mask
         
         if self.use_cls_token:
-            # Create padding mask: True for positions to ignore in attention
-            # cls_ignore: never ignore the CLS token (all False)
-            cls_ignore = torch.zeros(B, 1, device=valid_mask.device, dtype=torch.bool)
-            # For measurements, ignore if NOT valid (~valid_mask)
-            src_key_padding_mask = torch.cat([cls_ignore, ~valid_mask], dim=1)
+            cls = self.cls_token.expand(B, 1, -1)
+            g = self.global_proj(global_feat)
+            cls = cls + g.unsqueeze(1)
+            x_decoder_input = torch.cat([cls, x_restored], dim=1)
+            tgt_key_padding_mask = torch.cat([
+                torch.zeros(B, 1, device=device, dtype=torch.bool),
+                tgt_key_padding_mask
+            ], dim=1)
         else:
-            src_key_padding_mask = ~valid_mask
+            x_decoder_input = x_restored
         
-        x = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
-        x = self.norm(x)
+        x_decoded = self.decoder(
+            tgt=x_decoder_input,
+            memory=x_masked,
+            tgt_key_padding_mask=tgt_key_padding_mask,
+            memory_key_padding_mask=None
+        )
+        x_decoded = self.decoder_norm(x_decoded)
         
+        # ========== STEP 6: PREDICTION ==========
         if self.use_cls_token:
-            # Use MLP decoder instead of linear head
-            pred = self.decoder(x[:, 1:, :])  # Remove CLS token for prediction
-            cls = x[:, 0, :]                  # CLS token for downstream tasks
+            x_for_pred = x_decoded[:, 1:, :]
+            cls_token = x_decoded[:, 0, :]
         else:
-            pred = self.decoder(x)
-            cls = x.mean(dim=1)
+            x_for_pred = x_decoded
+            cls_token = x_decoded.mean(dim=1)
         
-        return pred, cls
+        pred = self.pred_head(x_for_pred)
+        mask = mask_positions.float()
+        
+        return pred, cls_token, mask
