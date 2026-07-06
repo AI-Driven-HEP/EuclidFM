@@ -1,5 +1,6 @@
 """
-Masking utilities for training
+Masking utilities for training - FIXED MASKING VERSION
+Based on original notebook: pretraining_fixed_mask_final.ipynb
 """
 import torch
 
@@ -14,7 +15,7 @@ def apply_mask_fixed(valid_mask, num_mask=20):
         num_mask: number of positions to mask per sample (default: 20)
     
     Returns:
-        mask_positions: (B, L) boolean tensor
+        mask_positions: (B, L) boolean tensor, True for positions to mask
     """
     B, L = valid_mask.shape
     device = valid_mask.device
@@ -41,25 +42,35 @@ def apply_mask_fixed(valid_mask, num_mask=20):
     return mask_positions
 
 
-def reconstruction_loss(pred, target, mask_positions, valid_mask):
+def reconstruction_loss(pred, target, mask, valid_mask):
     """
     MSE loss ONLY on masked positions.
     
     Args:
         pred: (B, L, 2) - predicted [flux, error]
         target: (B, L, 2) - ground truth [flux, error]
-        mask_positions: (B, L) - True for positions that were masked
-        valid_mask: (B, L) - True for valid positions (unused but kept for API consistency)
+        mask: (B, L) - Binary mask (1=masked, 0=kept) - می‌تواند Float یا Bool باشد
+        valid_mask: (B, L) - True where measurement is valid
     
     Returns:
         loss: scalar MSE loss averaged over masked positions
     """
-    # mask_positions already only includes valid positions (guaranteed by apply_mask_fixed)
-    if mask_positions.sum() == 0:
+    # تبدیل mask به boolean (اگر Float باشد)
+    if mask.dtype == torch.bool:
+        mask_bool = mask
+    else:
+        mask_bool = mask.bool()  # ✅ تبدیل Float به Bool
+    
+    # Only compute loss on positions that are:
+    # 1. Masked (mask == 1 or True)
+    # 2. Valid (valid_mask == True)
+    valid_mask_bool = valid_mask & mask_bool
+    
+    if valid_mask_bool.sum() == 0:
         return torch.tensor(0.0, device=pred.device)
     
     # MSE per feature, then mean over features, then select masked positions
     diff = (pred - target).pow(2).mean(dim=-1)  # (B, L)
-    masked_diff = diff[mask_positions]
+    masked_diff = diff[valid_mask_bool]
     
     return masked_diff.mean()
