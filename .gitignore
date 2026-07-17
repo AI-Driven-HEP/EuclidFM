@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.env
+
+euclid_random_100k_even_3fields_all_features.csv
+cleaned_output.csv
+euclid_measurements_dataset*.npz
+models_v2/
+checkpoints_v2/
+evaluation_outputs_v2/
+visualizations_v2/
+logs_v2/
