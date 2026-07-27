@@ -88,7 +88,7 @@ def _run_epoch(model, dataloader, cfg, optimizer=None):
 def train_v2(model, train_loader, validation_loader, cfg):
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
-    )
+    ) #?? it is aleardy defined in train.py . was it necessary 
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=10
     )
