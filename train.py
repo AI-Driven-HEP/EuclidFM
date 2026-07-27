@@ -29,7 +29,7 @@ def train():
     
     # Sample and split
     df_sampled = df_clean.sample(n=10000, random_state=cfg.seed)
-    train_df, val_df = train_test_split(df_sampled, test_size=0.2, random_state=cfg.seed)
+    train_df, val_df = train_test_split(df_sampled, test_size=0.2, random_state=cfg.seed) #??? check the inter-object dont shuffle 
     
     # Build datasets
     (train_values, train_mask, train_band, train_survey, train_type, 
