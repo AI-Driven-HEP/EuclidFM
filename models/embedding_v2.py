@@ -69,6 +69,6 @@ class PhotometryEmbeddingV2(nn.Module):
         else:
             embedded = embedded + self.global_proj(global_feat).unsqueeze(1)
 
-        embedded += self.pos_embed(self.pos_ids[:embedded.size(1)].unsqueeze(0))
+        embedded += self.pos_embed(self.pos_ids[:embedded.size(1)].unsqueeze(0)) #the positional is added after masking????
         return self.norm(embedded), valid_kept
 
