@@ -11,6 +11,8 @@ def apply_mask_fixed_v2(valid_mask: torch.Tensor, num_mask: int = 20):
     ids_keep_list = []
     ids_shuffle_list = []
 
+
+    #This comes with huge concerns, because we essentially need to make parallel on batch!!!!!
     for row in range(batch_size):
         valid_indices = torch.where(valid_mask[row])[0]
         number_valid = len(valid_indices)
