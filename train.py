@@ -14,8 +14,8 @@ from data.dataset import (
     extract_global_features, fit_global_scaler, transform_global,
     PhotometryDataset, filter_and_clean_data
 )
-from models.transformer import PhotometryTransformer
-from training.trainer import Trainer
+from models.transformer import PhotometryTransformer #?? must be v2 ?
+from training.trainer import Trainer #?? must be v2 or not ?
 from utils.helpers import set_global_seed, setup_logging
 
 logger = setup_logging()
