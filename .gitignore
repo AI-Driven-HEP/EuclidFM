@@ -12,3 +12,17 @@ checkpoints_v2/
 evaluation_outputs_v2/
 visualizations_v2/
 logs_v2/
+# Fine-tuning private data
+3-Class Sample.csv
+
+# Pretrained checkpoints
+*.pt
+*.pth
+*.ckpt
+
+# Fine-tuning generated outputs
+fine_tuning_outputs_v2/
+
+# Local editor files
+.vscode/
+.ipynb_checkpoints/
