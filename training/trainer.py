@@ -1,93 +1,170 @@
-"""
-Training functions (Baseline Version v1)
-"""
+"""Training, checkpointing, and metric history for the MAE-style model."""
 
+import json
 import logging
+from datetime import datetime
+
 import torch
 from tqdm import tqdm
+
+from models.masking import apply_mask_fixed, reconstruction_loss
 
 logger = logging.getLogger(__name__)
 
 
-def apply_mask_fixed(valid_mask, num_mask=20):
-    """
-    Generate exactly `num_mask` mask positions per sample (only from valid positions).
-    """
-    B, L = valid_mask.shape
-    device = valid_mask.device
-    mask_positions = torch.zeros(B, L, dtype=torch.bool, device=device)
+class TrainingHistory:
+    def __init__(self):
+        self.train_losses = []
+        self.validation_losses = []
+        self.learning_rates = []
+        self.epoch_times = []
+        self.best_validation_loss = float("inf")
+        self.best_epoch = -1
 
-    for i in range(B):
-        valid_indices = torch.where(valid_mask[i])[0]
-        n_valid = len(valid_indices)
+    def update(self, train_loss, validation_loss, learning_rate, seconds):
+        self.train_losses.append(train_loss)
+        self.validation_losses.append(validation_loss)
+        self.learning_rates.append(learning_rate)
+        self.epoch_times.append(seconds)
+        if validation_loss < self.best_validation_loss:
+            self.best_validation_loss = validation_loss
+            self.best_epoch = len(self.train_losses) - 1
 
-        if n_valid == 0:
-            continue
-
-        k = min(num_mask, n_valid)
-
-        if k > 0:
-            perm = torch.randperm(n_valid, device=device)[:k]
-            selected = valid_indices[perm]
-            mask_positions[i, selected] = True
-
-    return mask_positions
+    def save(self, path):
+        payload = vars(self).copy()
+        payload["timestamp"] = datetime.now().isoformat()
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
 
 
-def train_epoch(model, dataloader, optimizer, cfg, device):
-    """Train for one epoch."""
-    model.train()
+def _run_epoch(model, dataloader, cfg, optimizer=None):
+    training = optimizer is not None
+    model.train(training)
     total_loss = 0.0
-    num_batches = 0
+    valid_batches = 0
+    context = torch.enable_grad() if training else torch.no_grad()
 
-    for batch in tqdm(dataloader, desc="Train", leave=False):
-        values = batch["values"].to(device)
-        band = batch["band_ids"].to(device)
-        survey = batch["survey_ids"].to(device)
-        type_id = batch["type_ids"].to(device)
-        valid_mask = batch["valid_mask"].to(device)
-        global_feat = batch["global_features"].to(device)
+    with context:
+        for batch in tqdm(
+            dataloader,
+            desc="train" if training else "validation",
+            leave=False,
+        ):
+            batch = {key: value.to(cfg.device) for key, value in batch.items()}
+            mask_positions, ids_keep, ids_shuffle = apply_mask_fixed(
+                batch["valid_mask"], cfg.num_mask
+            )
+            prediction, _ = model(
+                batch["values"],
+                batch["band_ids"],
+                batch["survey_ids"],
+                batch["type_ids"],
+                batch["global_features"],
+                batch["valid_mask"],
+                mask_positions,
+                ids_keep,
+                ids_shuffle,
+            )
+            loss = reconstruction_loss(
+                prediction, batch["values"], mask_positions
+            )
+            if not torch.isfinite(loss):
+                logger.warning("Skipping a batch with non-finite loss")
+                continue
 
-        mask_positions = apply_mask_fixed(valid_mask, num_mask=20)
-        pred, _ = model(values, band, survey, type_id, global_feat, valid_mask, mask_positions)
-        loss = model.reconstruction_loss(pred, values, mask_positions, valid_mask)
+            if training:
+                optimizer.zero_grad(set_to_none=True)
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(
+                    model.parameters(), cfg.gradient_clip_norm
+                )
+                optimizer.step()
 
-        if torch.isnan(loss):
-            logger.warning("NaN loss detected, skipping batch")
-            continue
+            total_loss += loss.item()
+            valid_batches += 1
 
-        optimizer.zero_grad()
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        optimizer.step()
-
-        total_loss += loss.item()
-        num_batches += 1
-
-    return total_loss / max(num_batches, 1)
+    return total_loss / max(valid_batches, 1)
 
 
-def validate_epoch(model, dataloader, cfg, device):
-    """Validate for one epoch."""
-    model.eval()
-    total_loss = 0.0
-    num_batches = 0
+def train(model, train_loader, validation_loader, cfg):
+    optimizer = torch.optim.AdamW(
+        model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+    )
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=10
+    )
+    history = TrainingHistory()
+    latest_path = cfg.checkpoints_dir / "latest_checkpoint.pt"
+    start_epoch = 0
+    best_loss = float("inf")
+    patience_counter = 0
 
-    with torch.no_grad():
-        for batch in tqdm(dataloader, desc="Val", leave=False):
-            values = batch["values"].to(device)
-            band = batch["band_ids"].to(device)
-            survey = batch["survey_ids"].to(device)
-            type_id = batch["type_ids"].to(device)
-            valid_mask = batch["valid_mask"].to(device)
-            global_feat = batch["global_features"].to(device)
+    if latest_path.exists():
+        try:
+            checkpoint = torch.load(
+                latest_path, map_location=cfg.device, weights_only=False
+            )
+        except TypeError:
+            checkpoint = torch.load(latest_path, map_location=cfg.device)
+        model.load_state_dict(checkpoint["model_state_dict"])
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
+        if "scheduler_state_dict" in checkpoint:
+            scheduler.load_state_dict(checkpoint["scheduler_state_dict"])
+        start_epoch = checkpoint["epoch"]
+        best_loss = checkpoint.get("best_validation_loss", best_loss)
+        patience_counter = checkpoint.get("patience_counter", 0)
+        logger.info("Resuming training at epoch %d", start_epoch + 1)
 
-            mask_positions = apply_mask_fixed(valid_mask, num_mask=20)
-            pred, _ = model(values, band, survey, type_id, global_feat, valid_mask, mask_positions)
-            loss = model.reconstruction_loss(pred, values, mask_positions, valid_mask)
+    for epoch in range(start_epoch, cfg.epochs):
+        epoch_start = datetime.now()
+        train_loss = _run_epoch(model, train_loader, cfg, optimizer)
+        validation_loss = _run_epoch(model, validation_loader, cfg)
+        scheduler.step(validation_loss)
+        seconds = (datetime.now() - epoch_start).total_seconds()
+        history.update(
+            train_loss,
+            validation_loss,
+            optimizer.param_groups[0]["lr"],
+            seconds,
+        )
 
-            if not torch.isnan(loss):
-                total_loss += loss.item()
-                num_batches += 1
+        improved = validation_loss < best_loss
+        if improved:
+            best_loss = validation_loss
+            patience_counter = 0
+        else:
+            patience_counter += 1
 
-    return total_loss / max(num_batches, 1)
+        checkpoint = {
+            "epoch": epoch + 1,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "scheduler_state_dict": scheduler.state_dict(),
+            "train_loss": train_loss,
+            "validation_loss": validation_loss,
+            "best_validation_loss": best_loss,
+            "patience_counter": patience_counter,
+        }
+        torch.save(checkpoint, latest_path)
+        if (epoch + 1) % cfg.checkpoint_frequency == 0:
+            torch.save(
+                checkpoint,
+                cfg.checkpoints_dir / f"checkpoint_epoch_{epoch + 1:04d}.pt",
+            )
+        if improved:
+            torch.save(checkpoint, cfg.best_model_path)
+
+        logger.info(
+            "epoch %d/%d — train %.6f, validation %.6f",
+            epoch + 1,
+            cfg.epochs,
+            train_loss,
+            validation_loss,
+        )
+        if patience_counter >= cfg.early_stopping_patience:
+            logger.info("Stopping training early")
+            break
+
+    torch.save(model.state_dict(), cfg.final_model_path)
+    history.save(cfg.training_history_path)
+    return history
+
