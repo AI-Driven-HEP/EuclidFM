@@ -1,5 +1,8 @@
-"""
-Embedding layer with separate paths for flux and error (Baseline Version v1)
+"""Embedding layer for the MAE-style encoder.
+
+Only unmasked valid measurements are sent to the encoder. Their positional
+embeddings are gathered from their original sequence positions, rather than
+being reassigned according to the compacted/padded order.
 """
 
 import torch
@@ -7,113 +10,102 @@ import torch.nn as nn
 
 
 class PhotometryEmbedding(nn.Module):
-    """
-    Embedding layer for photometry time series with separate paths for flux and error.
-
-    Key improvement: Flux and error are processed through independent projection layers
-    before being combined with band, survey, and type embeddings.
-    """
-    def __init__(self, d_model, n_band, n_survey, n_type, max_len=512,
-                 cont_dim=64, band_dim=8, survey_dim=8, type_dim=4,
-                 use_global=True, global_dim=4, use_cls_token=True):
+    def __init__(
+        self,
+        d_model,
+        n_band,
+        n_survey,
+        n_type,
+        max_len=512,
+        cont_dim=64,
+        band_dim=8,
+        survey_dim=8,
+        type_dim=4,
+        global_dim=4,
+        use_cls_token=True,
+    ):
         super().__init__()
         self.d_model = d_model
-        self.use_global = use_global
         self.use_cls_token = use_cls_token
-
-        # SEPARATE paths for flux and error (each 1-dimensional input)
         self.flux_proj = nn.Sequential(
-            nn.Linear(1, cont_dim),
-            nn.GELU(),
-            nn.Linear(cont_dim, cont_dim)
+            nn.Linear(1, cont_dim), nn.GELU(), nn.Linear(cont_dim, cont_dim)
         )
-
         self.err_proj = nn.Sequential(
-            nn.Linear(1, cont_dim),
-            nn.GELU(),
-            nn.Linear(cont_dim, cont_dim)
+            nn.Linear(1, cont_dim), nn.GELU(), nn.Linear(cont_dim, cont_dim)
         )
-
         self.band_embed = nn.Embedding(n_band, band_dim)
         self.survey_embed = nn.Embedding(n_survey, survey_dim)
         self.type_embed = nn.Embedding(n_type, type_dim)
-
-        total_dim = cont_dim + cont_dim + band_dim + survey_dim + type_dim
+        combined_dim = 2 * cont_dim + band_dim + survey_dim + type_dim
         self.feature_fuser = nn.Sequential(
-            nn.Linear(total_dim, d_model),
+            nn.Linear(combined_dim, d_model),
             nn.GELU(),
-            nn.Linear(d_model, d_model)
+            nn.Linear(d_model, d_model),
         )
-
-        if use_global:
-            self.global_proj = nn.Sequential(
-                nn.Linear(global_dim, d_model),
-                nn.GELU(),
-                nn.Linear(d_model, d_model)
-            )
-
-        self.max_len = max_len
+        self.global_proj = nn.Sequential(
+            nn.Linear(global_dim, d_model),
+            nn.GELU(),
+            nn.Linear(d_model, d_model),
+        )
         self.pos_embed = nn.Embedding(max_len + 1, d_model)
         self.register_buffer("pos_ids", torch.arange(max_len + 1))
-
-        self.mask_token = nn.Parameter(torch.zeros(1, 1, d_model))
-        nn.init.normal_(self.mask_token, std=0.02)
-
-        if use_cls_token:
-            self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
-            nn.init.normal_(self.cls_token, std=0.02)
-
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
+        nn.init.normal_(self.cls_token, std=0.02)
         self.norm = nn.LayerNorm(d_model)
 
-    def forward(self, values, band, survey, type_id, global_feat, mask_positions):
-        """
-        Forward pass with separate paths for flux and error.
+    def forward(self, values, band, survey, type_id, global_feat, ids_keep):
+        batch_size = values.shape[0]
+        maximum_kept = max((indices.numel() for indices in ids_keep), default=0)
 
-        Args:
-            values: (B, L, 2) - [flux, error] after arcsinh transformation
-            band: (B, L) - band IDs
-            survey: (B, L) - survey IDs
-            type_id: (B, L) - type IDs
-            global_feat: (B, global_dim) - global features
-            mask_positions: (B, L) - positions to mask with mask_token
+        padded_values = values.new_zeros((batch_size, maximum_kept, 2))
+        padded_band = band.new_zeros((batch_size, maximum_kept))
+        padded_survey = survey.new_zeros((batch_size, maximum_kept))
+        padded_type = type_id.new_zeros((batch_size, maximum_kept))
+        kept_position_ids = band.new_zeros((batch_size, maximum_kept))
+        valid_kept = torch.zeros(
+            batch_size,
+            maximum_kept,
+            dtype=torch.bool,
+            device=values.device,
+        )
 
-        Returns:
-            x: (B, L + 1, d_model) if use_cls_token else (B, L, d_model)
-        """
-        B, L, _ = values.shape
+        position_offset = 1 if self.use_cls_token else 0
+        for row, indices in enumerate(ids_keep):
+            number_kept = indices.numel()
+            if number_kept:
+                padded_values[row, :number_kept] = values[row, indices]
+                padded_band[row, :number_kept] = band[row, indices]
+                padded_survey[row, :number_kept] = survey[row, indices]
+                padded_type[row, :number_kept] = type_id[row, indices]
+                kept_position_ids[row, :number_kept] = indices + position_offset
+                valid_kept[row, :number_kept] = True
 
-        flux = values[:, :, 0:1]
-        error = values[:, :, 1:2]
-
-        flux_feat = self.flux_proj(flux)
-        err_feat = self.err_proj(error)
-
-        band_e = self.band_embed(band)
-        survey_e = self.survey_embed(survey)
-        type_e = self.type_embed(type_id)
-
-        features = torch.cat([flux_feat, err_feat, band_e, survey_e, type_e], dim=-1)
-        x = self.feature_fuser(features)
-
-        # Apply mask token to masked positions
-        if mask_positions is not None:
-            mask_token = self.mask_token.expand(B, L, -1)
-            x = torch.where(mask_positions.unsqueeze(-1), mask_token, x)
+        features = torch.cat(
+            [
+                self.flux_proj(padded_values[:, :, 0:1]),
+                self.err_proj(padded_values[:, :, 1:2]),
+                self.band_embed(padded_band),
+                self.survey_embed(padded_survey),
+                self.type_embed(padded_type),
+            ],
+            dim=-1,
+        )
+        embedded = self.feature_fuser(features)
+        if maximum_kept:
+            embedded = embedded + self.pos_embed(kept_position_ids)
 
         if self.use_cls_token:
-            cls = self.cls_token.expand(B, 1, -1)
-            if self.use_global:
-                g = self.global_proj(global_feat)
-                cls = cls + g.unsqueeze(1)
-            x = torch.cat([cls, x], dim=1)
+            cls = self.cls_token.expand(batch_size, 1, -1)
+            cls = cls + self.global_proj(global_feat).unsqueeze(1)
+            cls = cls + self.pos_embed(
+                torch.zeros(batch_size, 1, dtype=torch.long, device=values.device)
+            )
+            embedded = torch.cat([cls, embedded], dim=1)
+            cls_valid = torch.ones(
+                batch_size, 1, dtype=torch.bool, device=values.device
+            )
+            valid_kept = torch.cat([cls_valid, valid_kept], dim=1)
         else:
-            if self.use_global:
-                g = self.global_proj(global_feat).unsqueeze(1)
-                x = x + g
+            embedded = embedded + self.global_proj(global_feat).unsqueeze(1)
 
-        seq_len = x.size(1)
-        pos_emb = self.pos_embed(self.pos_ids[:seq_len].unsqueeze(0))
-        x = x + pos_emb
-        x = self.norm(x)
-
-        return x
+        return self.norm(embedded), valid_kept
