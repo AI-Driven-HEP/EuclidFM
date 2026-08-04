@@ -1,5 +1,5 @@
 """
-Evaluation metrics (Baseline Version v1)
+Evaluation metrics
 """
 
 import numpy as np
