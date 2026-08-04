@@ -1,14 +1,7 @@
-"""
-Transformer model with fixed masking (Baseline Version v1)
-
-Key characteristics (BERT-style masking):
-1. All tokens are passed to the encoder (including masked ones)
-2. Mask tokens are replaced with mask_token in the embedding layer
-3. Decoder is a simple MLP (no transformer decoder)
-4. Loss computed only on masked positions
-"""
+"""MAE-style Transformer: encoder sees only unmasked valid measurements."""
 
 import logging
+
 import torch
 import torch.nn as nn
 
@@ -18,17 +11,12 @@ logger = logging.getLogger(__name__)
 
 
 class PhotometryTransformer(nn.Module):
-    """
-    Transformer model for photometry time series with masked autoencoding.
-    Uses BERT-style masking: mask tokens remain in the encoder input.
-    """
     def __init__(self, cfg, n_band, n_survey, n_type):
         super().__init__()
-        logger.info("Initializing Transformer (Baseline v1 - BERT-style masking)...")
-        logger.info(f"CLS token enabled: {cfg.use_cls_token}")
-        logger.info(f"Global features dimension: {cfg.global_features}")
-        logger.info("Using separate paths for flux and error")
-        logger.info("MASK tokens remain in encoder input (BERT-style)")
+        self.seq_len = cfg.seq_len
+        self.d_model = cfg.d_model
+        self.use_cls_token = cfg.use_cls_token
+        decoder_layers = getattr(cfg, "decoder_layers", 4)
 
         self.embedding = PhotometryEmbedding(
             d_model=cfg.d_model,
@@ -36,81 +24,105 @@ class PhotometryTransformer(nn.Module):
             n_survey=n_survey,
             n_type=n_type,
             max_len=cfg.seq_len,
-            use_global=True,
             global_dim=cfg.global_features,
-            use_cls_token=cfg.use_cls_token
+            use_cls_token=cfg.use_cls_token,
         )
-
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.d_model,
             nhead=cfg.n_heads,
             dim_feedforward=cfg.ff_dim,
             dropout=cfg.dropout,
-            batch_first=True
+            batch_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, cfg.n_layers)
-        self.norm = nn.LayerNorm(cfg.d_model)
+        self.encoder_norm = nn.LayerNorm(cfg.d_model)
 
-        # Decoder: Simple 3-layer MLP (no transformer decoder)
-        self.decoder = nn.Sequential(
+        self.decoder_embed = nn.Linear(cfg.d_model, cfg.d_model)
+        self.mask_token = nn.Parameter(torch.zeros(1, 1, cfg.d_model))
+        nn.init.normal_(self.mask_token, std=0.02)
+        self.decoder_pos_embed = nn.Embedding(cfg.seq_len + 1, cfg.d_model)
+        self.decoder_position_offset = 1 if cfg.use_cls_token else 0
+        self.register_buffer(
+            "decoder_pos_ids", torch.arange(cfg.seq_len + 1)
+        )
+        decoder_layer = nn.TransformerEncoderLayer(
+            d_model=cfg.d_model,
+            nhead=cfg.n_heads,
+            dim_feedforward=cfg.ff_dim,
+            dropout=cfg.dropout,
+            batch_first=True,
+        )
+        self.decoder = nn.TransformerEncoder(decoder_layer, decoder_layers)
+        self.decoder_norm = nn.LayerNorm(cfg.d_model)
+        self.decoder_pred = nn.Sequential(
             nn.Linear(cfg.d_model, cfg.d_model * 2),
             nn.GELU(),
             nn.Dropout(0.1),
             nn.Linear(cfg.d_model * 2, cfg.d_model),
             nn.GELU(),
-            nn.Linear(cfg.d_model, 2)
+            nn.Linear(cfg.d_model, 2),
+        )
+        logger.info("Initialized MAE-style Photometry Transformer")
+
+    def forward(
+        self,
+        values,
+        band,
+        survey,
+        type_id,
+        global_feat,
+        valid_mask,
+        mask_positions,
+        ids_keep,
+        ids_shuffle,
+    ):
+        # ids_shuffle is kept in the public API for compatibility with existing
+        # training code and checkpoints. Direct scatter by original indices is
+        # less error-prone than scattering and applying a second permutation.
+        del mask_positions, ids_shuffle
+
+        encoded, valid_kept = self.embedding(
+            values, band, survey, type_id, global_feat, ids_keep
+        )
+        encoded = self.encoder(encoded, src_key_padding_mask=~valid_kept)
+        encoded = self.encoder_norm(encoded)
+
+        if self.use_cls_token:
+            cls_embedding = encoded[:, 0]
+            encoded_measurements = encoded[:, 1:]
+        else:
+            cls_embedding = encoded.mean(dim=1)
+            encoded_measurements = encoded
+
+        encoded_measurements = self.decoder_embed(encoded_measurements)
+        batch_size = values.shape[0]
+        restored = self.mask_token.expand(
+            batch_size, self.seq_len, self.d_model
+        ).clone()
+
+        # Restore each encoded token directly to its original sequence index.
+        for row, kept_indices in enumerate(ids_keep):
+            number_kept = kept_indices.numel()
+            if number_kept:
+                restored[row, kept_indices] = encoded_measurements[
+                    row, :number_kept
+                ]
+
+        decoded = restored + self.decoder_pos_embed(
+            self.decoder_pos_ids[
+                self.decoder_position_offset:
+                self.decoder_position_offset + self.seq_len
+            ].unsqueeze(0)
         )
 
-        self.use_cls_token = cfg.use_cls_token
-        logger.info("Model ready.")
+        decoder_padding_mask = ~valid_mask
+        rows_without_valid_tokens = decoder_padding_mask.all(dim=1)
+        if rows_without_valid_tokens.any() and self.seq_len > 0:
+            decoder_padding_mask = decoder_padding_mask.clone()
+            decoder_padding_mask[rows_without_valid_tokens, 0] = False
 
-    def forward(self, values, band, survey, type_id, global_feat, valid_mask, mask_positions):
-        """
-        Forward pass with BERT-style masking.
-
-        Args:
-            values: (B, L, 2) - [flux, error] after arcsinh
-            band: (B, L) - band IDs
-            survey: (B, L) - survey IDs
-            type_id: (B, L) - type IDs
-            global_feat: (B, global_dim) - global features
-            valid_mask: (B, L) - True where measurement is valid
-            mask_positions: (B, L) - True where to mask
-
-        Returns:
-            pred: (B, L, 2) - predicted [flux, error]
-            cls: (B, d_model) - CLS token for downstream tasks
-        """
-        B = values.shape[0]
-        x = self.embedding(values, band, survey, type_id, global_feat, mask_positions)
-
-        if self.use_cls_token:
-            cls_ignore = torch.zeros(B, 1, device=valid_mask.device, dtype=torch.bool)
-            src_key_padding_mask = torch.cat([cls_ignore, ~valid_mask], dim=1)
-        else:
-            src_key_padding_mask = ~valid_mask
-
-        x = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
-        x = self.norm(x)
-
-        if self.use_cls_token:
-            pred = self.decoder(x[:, 1:, :])
-            cls = x[:, 0, :]
-        else:
-            pred = self.decoder(x)
-            cls = x.mean(dim=1)
-
-        return pred, cls
-
-
-def reconstruction_loss(pred, target, mask_positions, valid_mask):
-    """
-    MSE loss ONLY on masked positions.
-    """
-    if mask_positions.sum() == 0:
-        return torch.tensor(0.0, device=pred.device)
-
-    diff = (pred - target).pow(2).mean(dim=-1)
-    masked_diff = diff[mask_positions]
-
-    return masked_diff.mean()
+        decoded = self.decoder(
+            decoded, src_key_padding_mask=decoder_padding_mask
+        )
+        decoded = self.decoder_norm(decoded)
+        return self.decoder_pred(decoded), cls_embedding
