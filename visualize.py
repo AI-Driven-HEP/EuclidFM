@@ -3,11 +3,28 @@
 import matplotlib.pyplot as plt
 import numpy as np
 from sklearn.manifold import TSNE
+from sklearn.metrics import r2_score
+import logging
+
+logger = logging.getLogger(__name__)
 
 
-def create_plots(history, results, output_directory, seed=42):
+def create_plots(history, results, output_directory, seed=42, dataset_metadata=None):
+    """
+    Generate visualization plots including R² per object analysis.
+    
+    Args:
+        history: Training history object
+        results: Dictionary with 'true', 'predicted', 'embeddings'
+        output_directory: Path to save plots
+        seed: Random seed for reproducibility
+        dataset_metadata: Dict with 'object_ids', 'ra', 'dec', 'total_flux'
+    """
     output_directory.mkdir(parents=True, exist_ok=True)
 
+    # ============================================================
+    # PLOT 1: Loss curves
+    # ============================================================
     figure, axis = plt.subplots(figsize=(10, 6))
     axis.plot(history.train_losses, label="Train loss", linewidth=2)
     axis.plot(history.validation_losses, label="Validation loss", linewidth=2)
@@ -18,13 +35,16 @@ def create_plots(history, results, output_directory, seed=42):
             linestyle="--",
             label=f"Best epoch ({history.best_epoch + 1})",
         )
-    axis.set(xlabel="Epoch", ylabel="Loss", title="training and validation loss")
+    axis.set(xlabel="Epoch", ylabel="Loss", title="Training and Validation Loss")
     axis.legend()
     axis.grid(alpha=0.3)
     figure.tight_layout()
     figure.savefig(output_directory / "01_loss_curves.png", dpi=300)
     plt.close(figure)
 
+    # ============================================================
+    # PLOT 2: Reconstruction scatter
+    # ============================================================
     true_values = results["true"]
     predicted_values = results["predicted"]
     figure, axes = plt.subplots(1, 2, figsize=(12, 5))
@@ -42,13 +62,16 @@ def create_plots(history, results, output_directory, seed=42):
         axes[feature].set(
             xlabel=f"True {name} (arcsinh)",
             ylabel=f"Predicted {name} (arcsinh)",
-            title=f"{name}: true vs predicted",
+            title=f"{name}: True vs Predicted",
         )
         axes[feature].grid(alpha=0.3)
     figure.tight_layout()
     figure.savefig(output_directory / "02_reconstruction_scatter.png", dpi=300)
     plt.close(figure)
 
+    # ============================================================
+    # PLOT 3: Residual histograms
+    # ============================================================
     residuals = predicted_values - true_values
     figure, axes = plt.subplots(1, 2, figsize=(12, 5))
     for feature, name in enumerate(("Flux", "Error")):
@@ -57,12 +80,15 @@ def create_plots(history, results, output_directory, seed=42):
         axes[feature].set(
             xlabel="Predicted − true",
             ylabel="Count",
-            title=f"{name} residuals",
+            title=f"{name} Residuals",
         )
     figure.tight_layout()
     figure.savefig(output_directory / "03_residual_histograms.png", dpi=300)
     plt.close(figure)
 
+    # ============================================================
+    # PLOT 4: t-SNE of embeddings (basic)
+    # ============================================================
     embeddings = results["embeddings"]
     if len(embeddings) > 30:
         perplexity = min(30, max(5, (len(embeddings) - 1) // 3))
@@ -71,8 +97,233 @@ def create_plots(history, results, output_directory, seed=42):
         ).fit_transform(embeddings)
         figure, axis = plt.subplots(figsize=(9, 8))
         axis.scatter(projected[:, 0], projected[:, 1], s=15, alpha=0.6)
-        axis.set(title="t-SNE of CLS embeddings")
+        axis.set(title="t-SNE of CLS Embeddings")
         figure.tight_layout()
         figure.savefig(output_directory / "04_tsne_cls_embeddings.png", dpi=300)
         plt.close(figure)
 
+    # ============================================================
+    # NEW PLOTS: R² per object and bias analysis
+    # ============================================================
+    if dataset_metadata is not None:
+        object_ids = dataset_metadata.get('object_ids')
+        total_flux = dataset_metadata.get('total_flux')
+        ra = dataset_metadata.get('ra')
+        dec = dataset_metadata.get('dec')
+        
+        if object_ids is not None:
+            logger.info("Calculating R² per object...")
+            unique_objects = np.unique(object_ids)
+            r2_per_object = []
+            flux_per_object = []
+            
+            for obj_id in unique_objects:
+                mask = object_ids == obj_id
+                if mask.sum() < 2:
+                    continue
+                    
+                true_obj = true_values[mask, 0]
+                pred_obj = predicted_values[mask, 0]
+                
+                r2 = r2_score(true_obj, pred_obj)
+                r2_per_object.append(r2)
+                
+                if total_flux is not None:
+                    flux_per_object.append(total_flux[mask].mean())
+            
+            r2_per_object = np.array(r2_per_object)
+            flux_per_object = np.array(flux_per_object) if flux_per_object else None
+            
+            # Plot 5: R² distribution histogram
+            figure, axis = plt.subplots(figsize=(10, 6))
+            axis.hist(r2_per_object, bins=50, alpha=0.75, edgecolor='black')
+            axis.axvline(0, color='red', linestyle='--', linewidth=2, label='R² = 0')
+            axis.axvline(np.mean(r2_per_object), color='green', linestyle='-', 
+                        linewidth=2, label=f'Mean R² = {np.mean(r2_per_object):.3f}')
+            axis.set(
+                xlabel='R² per Object',
+                ylabel='Number of Objects',
+                title=f'R² Distribution per Object (N={len(r2_per_object)})'
+            )
+            axis.legend()
+            axis.grid(alpha=0.3)
+            figure.tight_layout()
+            figure.savefig(output_directory / "05_r2_per_object_histogram.png", dpi=300)
+            plt.close(figure)
+            
+            # Plot 6: R² vs total flux with colorbar
+            if flux_per_object is not None and len(flux_per_object) > 0:
+                figure, axis = plt.subplots(figsize=(10, 8))
+                
+                sort_idx = np.argsort(flux_per_object)
+                sorted_flux = flux_per_object[sort_idx]
+                sorted_r2 = r2_per_object[sort_idx]
+                
+                scatter = axis.scatter(
+                    sorted_flux, 
+                    sorted_r2,
+                    c=sorted_flux,
+                    cmap='viridis',
+                    s=30,
+                    alpha=0.7,
+                    edgecolors='black',
+                    linewidth=0.5
+                )
+                
+                cbar = figure.colorbar(scatter, ax=axis)
+                cbar.set_label('Total Flux (arcsinh)', fontsize=12)
+                
+                axis.axhline(0, color='red', linestyle='--', linewidth=2, alpha=0.7)
+                axis.axhline(np.mean(r2_per_object), color='green', linestyle='-', 
+                            linewidth=2, alpha=0.7, label=f'Mean R² = {np.mean(r2_per_object):.3f}')
+                
+                axis.set(
+                    xlabel='Total Flux per Object (arcsinh)',
+                    ylabel='R² per Object',
+                    title=f'R² vs Total Flux per Object (N={len(r2_per_object)})'
+                )
+                axis.legend()
+                axis.grid(alpha=0.3)
+                figure.tight_layout()
+                figure.savefig(output_directory / "06_r2_vs_flux_colorbar.png", dpi=300)
+                plt.close(figure)
+                
+                # Plot 7: Bias vs flux
+                mean_residual_per_object = []
+                flux_for_residuals = []
+                
+                for obj_id in unique_objects:
+                    mask = object_ids == obj_id
+                    if mask.sum() < 2:
+                        continue
+                    true_obj = true_values[mask, 0]
+                    pred_obj = predicted_values[mask, 0]
+                    mean_residual = np.mean(pred_obj - true_obj)
+                    mean_residual_per_object.append(mean_residual)
+                    if total_flux is not None:
+                        flux_for_residuals.append(total_flux[mask].mean())
+                
+                mean_residual_per_object = np.array(mean_residual_per_object)
+                flux_for_residuals = np.array(flux_for_residuals)
+                
+                if len(flux_for_residuals) > 0:
+                    figure, axis = plt.subplots(figsize=(10, 8))
+                    
+                    scatter = axis.scatter(
+                        flux_for_residuals,
+                        mean_residual_per_object,
+                        c=flux_for_residuals,
+                        cmap='viridis',
+                        s=30,
+                        alpha=0.7,
+                        edgecolors='black',
+                        linewidth=0.5
+                    )
+                    
+                    cbar = figure.colorbar(scatter, ax=axis)
+                    cbar.set_label('Total Flux (arcsinh)', fontsize=12)
+                    
+                    axis.axhline(0, color='red', linestyle='--', linewidth=2, alpha=0.7)
+                    
+                    z = np.polyfit(flux_for_residuals, mean_residual_per_object, 1)
+                    p = np.poly1d(z)
+                    axis.plot(np.sort(flux_for_residuals), 
+                             p(np.sort(flux_for_residuals)), 
+                             "r-", linewidth=2, 
+                             label=f'Trend: slope={z[0]:.4f}')
+                    
+                    axis.set(
+                        xlabel='Total Flux per Object (arcsinh)',
+                        ylabel='Mean Residual (Predicted - True) per Object',
+                        title=f'Bias vs Total Flux (N={len(mean_residual_per_object)})'
+                    )
+                    axis.legend()
+                    axis.grid(alpha=0.3)
+                    figure.tight_layout()
+                    figure.savefig(output_directory / "07_bias_vs_flux.png", dpi=300)
+                    plt.close(figure)
+
+            # ============================================================
+            # PLOTS 8-10: t-SNE colored by RA, DEC, and flux
+            # ============================================================
+            if len(embeddings) > 30 and ra is not None and dec is not None:
+                logger.info("Creating t-SNE plots with RA, DEC, and flux colorbars...")
+                
+                perplexity = min(30, max(5, (len(embeddings) - 1) // 3))
+                tsne = TSNE(n_components=2, random_state=seed, perplexity=perplexity)
+                projected = tsne.fit_transform(embeddings)
+                
+                # Plot 8: t-SNE colored by RA
+                figure, axis = plt.subplots(figsize=(10, 8))
+                scatter = axis.scatter(
+                    projected[:, 0], 
+                    projected[:, 1],
+                    c=ra,
+                    cmap='plasma',
+                    s=20,
+                    alpha=0.7,
+                    edgecolors='black',
+                    linewidth=0.3
+                )
+                cbar = figure.colorbar(scatter, ax=axis)
+                cbar.set_label('RA (degrees)', fontsize=12)
+                axis.set(
+                    xlabel='t-SNE 1',
+                    ylabel='t-SNE 2',
+                    title='t-SNE of CLS Embeddings Colored by RA'
+                )
+                axis.grid(alpha=0.3)
+                figure.tight_layout()
+                figure.savefig(output_directory / "08_tsne_colored_by_ra.png", dpi=300)
+                plt.close(figure)
+                
+                # Plot 9: t-SNE colored by DEC
+                figure, axis = plt.subplots(figsize=(10, 8))
+                scatter = axis.scatter(
+                    projected[:, 0], 
+                    projected[:, 1],
+                    c=dec,
+                    cmap='plasma',
+                    s=20,
+                    alpha=0.7,
+                    edgecolors='black',
+                    linewidth=0.3
+                )
+                cbar = figure.colorbar(scatter, ax=axis)
+                cbar.set_label('DEC (degrees)', fontsize=12)
+                axis.set(
+                    xlabel='t-SNE 1',
+                    ylabel='t-SNE 2',
+                    title='t-SNE of CLS Embeddings Colored by DEC'
+                )
+                axis.grid(alpha=0.3)
+                figure.tight_layout()
+                figure.savefig(output_directory / "09_tsne_colored_by_dec.png", dpi=300)
+                plt.close(figure)
+                
+                # Plot 10: t-SNE colored by total flux
+                if total_flux is not None:
+                    figure, axis = plt.subplots(figsize=(10, 8))
+                    scatter = axis.scatter(
+                        projected[:, 0], 
+                        projected[:, 1],
+                        c=total_flux,
+                        cmap='viridis',
+                        s=20,
+                        alpha=0.7,
+                        edgecolors='black',
+                        linewidth=0.3
+                    )
+                    cbar = figure.colorbar(scatter, ax=axis)
+                    cbar.set_label('Total Flux (arcsinh)', fontsize=12)
+                    axis.set(
+                        xlabel='t-SNE 1',
+                        ylabel='t-SNE 2',
+                        title='t-SNE of CLS Embeddings Colored by Total Flux'
+                    )
+                    axis.grid(alpha=0.3)
+                    figure.tight_layout()
+                    figure.savefig(output_directory / "10_tsne_colored_by_flux.png", dpi=300)
+                    plt.close(figure)
+    
+    logger.info(f"All plots saved to: {output_directory}")
