@@ -11,7 +11,7 @@ class Config:
     input_csv: str = "euclid_random_100k_even_3fields_all_features.csv"
     cleaned_csv: str = "cleaned_output.csv"
     dataset_npz: str = "euclid_measurements_dataset.npz"
-    sample_size: int = 10_000
+    sample_size: int = 100_000
     validation_fraction: float = 0.2
     seed: int = 42
     global_features: int = 4
@@ -37,6 +37,7 @@ class Config:
     evaluation_dir: Path = Path("evaluation_outputs")
     visualization_dir: Path = Path("visualizations")
     logs_dir: Path = Path("logs")
+    resume_from_best: bool = True  # NEW: flag to resume from best model
 
     def create_output_directories(self):
         for directory in (
@@ -59,4 +60,3 @@ class Config:
     @property
     def training_history_path(self):
         return self.logs_dir / "training_history.json"
-
