@@ -17,6 +17,9 @@ class PhotometryTransformer(nn.Module):
         self.d_model = cfg.d_model
         self.use_cls_token = cfg.use_cls_token
         decoder_layers = getattr(cfg, "decoder_layers", 4)
+        
+        # Get flags from config
+        use_global_features = getattr(cfg, "use_global_features", True)
 
         self.embedding = PhotometryEmbedding(
             d_model=cfg.d_model,
@@ -26,6 +29,7 @@ class PhotometryTransformer(nn.Module):
             max_len=cfg.seq_len,
             global_dim=cfg.global_features,
             use_cls_token=cfg.use_cls_token,
+            use_global_features=use_global_features,  
         )
         encoder_layer = nn.TransformerEncoderLayer(
             d_model=cfg.d_model,
@@ -62,7 +66,9 @@ class PhotometryTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(cfg.d_model, 2),
         )
-        logger.info("Initialized MAE-style Photometry Transformer")
+        
+        logger.info(f"Initialized MAE-style Photometry Transformer")
+        logger.info(f"  - Use global features: {use_global_features}")
 
     def forward(
         self,
