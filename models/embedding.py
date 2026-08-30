@@ -23,10 +23,13 @@ class PhotometryEmbedding(nn.Module):
         type_dim=4,
         global_dim=4,
         use_cls_token=True,
+        use_global_features=True,  # NEW: Enable/disable global features
     ):
         super().__init__()
         self.d_model = d_model
         self.use_cls_token = use_cls_token
+        self.use_global_features = use_global_features  # NEW: Store the flag
+        
         self.flux_proj = nn.Sequential(
             nn.Linear(1, cont_dim), nn.GELU(), nn.Linear(cont_dim, cont_dim)
         )
@@ -42,11 +45,17 @@ class PhotometryEmbedding(nn.Module):
             nn.GELU(),
             nn.Linear(d_model, d_model),
         )
-        self.global_proj = nn.Sequential(
-            nn.Linear(global_dim, d_model),
-            nn.GELU(),
-            nn.Linear(d_model, d_model),
-        )
+        
+        # NEW: Only create global projection if global features are used
+        if use_global_features:
+            self.global_proj = nn.Sequential(
+                nn.Linear(global_dim, d_model),
+                nn.GELU(),
+                nn.Linear(d_model, d_model),
+            )
+        else:
+            self.global_proj = None
+        
         self.pos_embed = nn.Embedding(max_len + 1, d_model)
         self.register_buffer("pos_ids", torch.arange(max_len + 1))
         self.cls_token = nn.Parameter(torch.zeros(1, 1, d_model))
@@ -96,7 +105,11 @@ class PhotometryEmbedding(nn.Module):
 
         if self.use_cls_token:
             cls = self.cls_token.expand(batch_size, 1, -1)
-            cls = cls + self.global_proj(global_feat).unsqueeze(1)
+            
+            # NEW: Only add global features if enabled
+            if self.use_global_features and self.global_proj is not None:
+                cls = cls + self.global_proj(global_feat).unsqueeze(1)
+            
             cls = cls + self.pos_embed(
                 torch.zeros(batch_size, 1, dtype=torch.long, device=values.device)
             )
@@ -106,6 +119,8 @@ class PhotometryEmbedding(nn.Module):
             )
             valid_kept = torch.cat([cls_valid, valid_kept], dim=1)
         else:
-            embedded = embedded + self.global_proj(global_feat).unsqueeze(1)
+            # NEW: Only add global features if enabled
+            if self.use_global_features and self.global_proj is not None:
+                embedded = embedded + self.global_proj(global_feat).unsqueeze(1)
 
         return self.norm(embedded), valid_kept
