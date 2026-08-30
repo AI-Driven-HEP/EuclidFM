@@ -14,6 +14,13 @@ def parse_args():
     parser.add_argument("--device", type=str, help="Override device")
     parser.add_argument("--resume-best", action="store_true", 
                        help="Resume training from the best model checkpoint")
+    
+    # NEW: Global features control
+    parser.add_argument("--use-global", action="store_true", 
+                       help="Use global features (RA, DEC, flux) in the model")
+    parser.add_argument("--no-global", action="store_true", 
+                       help="Disable global features in the model")
+    
     return parser.parse_args()
 
 
@@ -29,10 +36,15 @@ def main():
         cfg.lr = args.lr
     if args.device is not None:
         cfg.device = args.device
-    
-    # Set flag for resuming from best
     if args.resume_best:
         cfg.resume_from_best = True
+    
+    # Handle global features control
+    if args.use_global:
+        cfg.use_global_features = True
+    elif args.no_global:
+        cfg.use_global_features = False
+    # If neither is provided, default (True) is used
 
     return run(cfg)
 
