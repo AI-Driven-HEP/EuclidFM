@@ -22,6 +22,7 @@ class Config:
     ff_dim: int = 512
     dropout: float = 0.1
     use_cls_token: bool = True
+    use_global_features: bool = False  
     batch_size: int = 32
     num_workers: int = 0
     lr: float = 3e-4
@@ -37,7 +38,7 @@ class Config:
     evaluation_dir: Path = Path("evaluation_outputs")
     visualization_dir: Path = Path("visualizations")
     logs_dir: Path = Path("logs")
-    resume_from_best: bool = True  # NEW: flag to resume from best model
+    resume_from_best: bool = False
 
     def create_output_directories(self):
         for directory in (
