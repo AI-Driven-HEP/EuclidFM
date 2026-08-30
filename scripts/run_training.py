@@ -355,6 +355,7 @@ def main(config: Config | None = None):
     ).to(cfg.device)
     logger.info(f"Model initialized on: {cfg.device}")
     logger.info(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    logger.info(f"  - Use global features: {cfg.use_global_features}")
 
     # ============================================================
     # STEP 8.5: LOAD BEST MODEL IF REQUESTED (NEW)
