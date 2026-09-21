@@ -6,11 +6,24 @@ CORRECTED + EXTENDED VERSION:
   - Shape guards raise clear errors when misalignment is detected.
   - plot_r2_scatter_diagnostic builds its x-axis from the masked array length.
 
-  NEW plots added (13-16):
-    13. Per-object flux bias vs. TRUE total detection flux (log-x scatter)
+  PLOTS OVERVIEW:
+    01. Training / validation loss curves
+    02. Reconstruction scatter (True vs Predicted)
+    03. Residual histograms
+    04. Basic t-SNE of CLS embeddings
+    05. R² per-object histogram
+    06. Per-object Flux R² scatter diagnostic
+    07. Per-object Error R² scatter diagnostic
+    08. Bias vs Total Flux (linear trend)
+    09. t-SNE coloured by RA
+    10. t-SNE coloured by DEC
+    11. t-SNE coloured by Total Flux
+    12. 3D t-SNE coloured by Total Flux
+    13. Per-object flux bias vs TRUE total detection flux (log-x scatter)
     14. Flux-binned bias diagnostic (mean ± SEM and median vs flux)
     15. t-SNE coloured by sin(RA)
     16. t-SNE coloured by scaled DEC
+    17. t-SNE coloured by PHZ classification (star / galaxy / quasar)  ← NEW
 """
 
 import matplotlib.pyplot as plt
@@ -334,7 +347,7 @@ def plot_3d_tsne(embedding_3d, true_flux, output_directory,
 
 
 # ------------------------------------------------------------------------------
-# NEW PLOT 13: Per-object flux bias vs. TRUE total detection flux
+# PLOT 13: Per-object flux bias vs. TRUE total detection flux
 # ------------------------------------------------------------------------------
 def plot_per_object_bias_vs_true_flux(
     true_flux_per_obj, mean_residual_per_obj, output_directory,
@@ -386,7 +399,7 @@ def plot_per_object_bias_vs_true_flux(
 
 
 # ------------------------------------------------------------------------------
-# NEW PLOT 14: Flux-binned bias diagnostic (mean ± SEM, median)
+# PLOT 14: Flux-binned bias diagnostic (mean ± SEM, median)
 # ------------------------------------------------------------------------------
 def plot_flux_binned_bias(
     true_flux_per_obj, mean_residual_per_obj, output_directory,
@@ -463,7 +476,7 @@ def plot_flux_binned_bias(
 
 
 # ------------------------------------------------------------------------------
-# NEW PLOT 15/16: t-SNE coloured by transformed coordinates
+# PLOT 15/16: t-SNE coloured by transformed coordinates
 # ------------------------------------------------------------------------------
 def plot_tsne_by_coordinate(
     embedding_2d, ra_per_obj, dec_per_obj, output_directory,
@@ -497,7 +510,6 @@ def plot_tsne_by_coordinate(
             label = "RA (degrees)"
             title = "t-SNE of CLS embeddings — coloured by RA"
 
-        # Use a non-dark background and 'viridis' cmap for coordinate plots
         _plot_tsne_coord(
             embedding_2d=embedding_2d,
             values=ra_transformed,
@@ -513,7 +525,6 @@ def plot_tsne_by_coordinate(
     if dec_per_obj is not None:
         dec = np.asarray(dec_per_obj, dtype=float)[:n_obj]
         if scale_mode == "trig":
-            # Simple normalisation: DEC ranges in [-90, 90]
             dec_transformed = dec / 90.0
             label = "DEC (model-scaled)"
             title = "t-SNE of CLS embeddings — coloured by scaled DEC"
@@ -603,6 +614,147 @@ def _plot_tsne_coord(
     plt.close(fig)
 
 
+# ------------------------------------------------------------------------------
+# PLOT 17: t-SNE coloured by PHZ classification (star / galaxy / quasar)
+# ------------------------------------------------------------------------------
+def plot_tsne_by_class(
+    embedding_2d, class_labels, class_names, output_directory,
+    filename="17_tsne_colored_by_phz_class",
+    colors=None, markers=None,
+    add_convex_hulls=False,
+    title="t-SNE of CLS embeddings — coloured by PHZ classification",
+):
+    """
+    t-SNE scatter coloured by discrete class labels (star / galaxy / quasar).
+
+    The classification scheme used here maps:
+        0 → quasar
+        1 → star
+        2 → galaxy
+
+    Parameters
+    ----------
+    embedding_2d     : (N_obj, 2) t-SNE coords.
+    class_labels     : (N_obj,) int array — class code per object
+                       (0 = quasar, 1 = star, 2 = galaxy). Entries not in
+                       `class_names` are shown as 'Unknown'.
+    class_names      : dict {code: name} — mapping code → human-readable name.
+    output_directory : Path
+    filename         : str — output filename (without extension).
+    colors           : dict {code: hex} (optional). Defaults to a curated palette.
+    markers          : dict {code: marker} (optional). Defaults to ○ △ ★.
+    add_convex_hulls : bool — if True, overlay a translucent convex hull per class.
+    title            : str — plot title.
+    """
+    embedding_2d = np.asarray(embedding_2d)
+    class_labels = np.asarray(class_labels)
+
+    # ---- Shape guard ----
+    if embedding_2d.shape[0] != class_labels.shape[0]:
+        raise ValueError(
+            f"[plot_tsne_by_class] shape mismatch for '{filename}': "
+            f"embedding_2d has {embedding_2d.shape[0]} rows but "
+            f"class_labels has {class_labels.shape[0]} rows."
+        )
+
+    # ---- Normalise class_names to a dict {code: name} ----
+    if isinstance(class_names, (list, tuple)):
+        class_names = {i: name for i, name in enumerate(class_names)}
+
+    # ---- Present classes = codes that actually appear in the data ----
+    present_codes = [c for c in class_names.keys() if c in np.unique(class_labels)]
+    if not present_codes:
+        logger.warning(
+            f"[plot_tsne_by_class] No matching classes found for '{filename}'. Skipping."
+        )
+        return
+
+    # ---- Default colour palette (Star=gold, Galaxy=blue, Quasar=red) ----
+    #     Ordered by the numeric code used in the dataset.
+    if colors is None:
+        colors = {
+            0: "#E15759",   # quasar — red
+            1: "#FFD700",   # star   — gold
+            2: "#4E79A7",   # galaxy — blue
+        }
+        # Fallback for any additional codes
+        fallback = ["#76B7B2", "#59A14F", "#B07AA1", "#EDC948"]
+        for i, code in enumerate(present_codes):
+            if code not in colors:
+                colors[code] = fallback[i % len(fallback)]
+
+    # ---- Default marker style per class ----
+    if markers is None:
+        markers = {0: "*", 1: "o", 2: "^"}   # quasar=★  star=○  galaxy=△
+        fallback_m = ["s", "D", "P", "v"]
+        for i, code in enumerate(present_codes):
+            if code not in markers:
+                markers[code] = fallback_m[i % len(fallback_m)]
+
+    fig, ax = plt.subplots(figsize=(11, 9))
+    ax.set_facecolor("white")
+
+    # ---- Optional: translucent convex hull per class ----
+    if add_convex_hulls:
+        try:
+            from scipy.spatial import ConvexHull
+            for code in present_codes:
+                mask = class_labels == code
+                pts = embedding_2d[mask]
+                if pts.shape[0] < 3:
+                    continue
+                try:
+                    hull = ConvexHull(pts)
+                    hull_pts = pts[np.append(hull.vertices, hull.vertices[0])]
+                    ax.fill(hull_pts[:, 0], hull_pts[:, 1],
+                            color=colors[code], alpha=0.08,
+                            edgecolor=colors[code], linewidth=1.0,
+                            linestyle="--", zorder=1)
+                except Exception:
+                    pass  # degenerate hull — skip silently
+        except ImportError:
+            logger.warning("[plot_tsne_by_class] scipy not available; skipping hulls.")
+
+    # ---- Scatter each class separately (clean legend) ----
+    for code in present_codes:
+        mask = class_labels == code
+        n = int(mask.sum())
+        if n == 0:
+            continue
+        ax.scatter(
+            embedding_2d[mask, 0], embedding_2d[mask, 1],
+            c=colors[code],
+            marker=markers[code],
+            s=22, alpha=0.75,
+            edgecolors="black", linewidths=0.35,
+            label=f"{class_names[code]}  (n = {n:,})",
+            zorder=2,
+        )
+
+    # ---- Handle 'Unknown' (codes not in class_names) separately ----
+    known_codes = list(class_names.keys())
+    unknown_mask = ~np.isin(class_labels, known_codes)
+    if unknown_mask.sum() > 0:
+        ax.scatter(
+            embedding_2d[unknown_mask, 0], embedding_2d[unknown_mask, 1],
+            c="#BDBDBD", marker="x", s=18, alpha=0.55,
+            label=f"Unknown  (n = {int(unknown_mask.sum()):,})",
+            zorder=1,
+        )
+
+    ax.set_xlabel("t-SNE component 1", fontsize=12)
+    ax.set_ylabel("t-SNE component 2", fontsize=12)
+    ax.set_title(title, fontsize=13, loc="left")
+    ax.grid(alpha=0.15)
+    ax.legend(loc="best", fontsize=11, framealpha=0.95,
+              markerscale=1.5, handletextpad=0.6)
+
+    fig.tight_layout()
+    fig.savefig(output_directory / f"{filename}.png", dpi=300)
+    fig.savefig(output_directory / f"{filename}.pdf")
+    plt.close(fig)
+
+
 # ==============================================================================
 # Main Function
 # ==============================================================================
@@ -625,6 +777,7 @@ def create_plots(history, results, output_directory, seed=42, dataset_metadata=N
         - 'total_flux_obj'  : (N_obj,) float (optional)
         - 'ra_obj'          : (N_obj,) float (optional)
         - 'dec_obj'         : (N_obj,) float (optional)
+        - 'class_labels_obj': (N_obj,) int   (optional; 0=quasar, 1=star, 2=galaxy)
     """
     output_directory.mkdir(parents=True, exist_ok=True)
 
@@ -693,7 +846,7 @@ def create_plots(history, results, output_directory, seed=42, dataset_metadata=N
     # PER-OBJECT DIAGNOSTICS
     # ============================================================
     if dataset_metadata is None:
-        logger.info("dataset_metadata not provided. Skipping plots 5-16.")
+        logger.info("dataset_metadata not provided. Skipping plots 5-17.")
         logger.info(f"All plots saved to: {output_directory}")
         return
 
@@ -703,7 +856,7 @@ def create_plots(history, results, output_directory, seed=42, dataset_metadata=N
     dec_sample = dataset_metadata.get('dec')
 
     if object_ids is None:
-        logger.info("object_ids missing. Skipping plots 5-16.")
+        logger.info("object_ids missing. Skipping plots 5-17.")
         logger.info(f"All plots saved to: {output_directory}")
         return
 
@@ -790,7 +943,7 @@ def create_plots(history, results, output_directory, seed=42, dataset_metadata=N
             )
             logger.info("PLOT 7 (Error R² diagnostic) generated.")
 
-    # --- PLOT 8: Bias vs flux (existing linear-trend version) ---
+    # --- PLOT 8: Bias vs flux (linear-trend version) ---
     if flux_per_object is not None:
         valid_8 = (np.isfinite(flux_per_object)
                    & np.isfinite(mean_residual_per_object))
@@ -903,7 +1056,7 @@ def create_plots(history, results, output_directory, seed=42, dataset_metadata=N
         logger.info("PLOT 12 (3D t-SNE) generated.")
 
     # ============================================================
-    # NEW: PLOTS 13-16
+    # PLOTS 13-16: Extended diagnostics
     # ============================================================
     if flux_per_object is not None and len(flux_per_object) > 0:
         # --- PLOT 13: Per-object bias vs TRUE flux ---
@@ -935,5 +1088,55 @@ def create_plots(history, results, output_directory, seed=42, dataset_metadata=N
         bins=40,
     )
     logger.info("PLOTS 15 & 16 (sin(RA) and scaled DEC t-SNE) attempted.")
+
+    # ============================================================
+    # PLOT 17: t-SNE coloured by PHZ classification
+    # ------------------------------------------------------------
+    # Classification scheme (from the input catalog's
+    # PHZ__PHZ_CLASSIFICATION column):
+    #     0 → quasar
+    #     1 → star
+    #     2 → galaxy
+    # ============================================================
+    class_labels_obj = dataset_metadata.get('class_labels_obj')
+
+    if class_labels_obj is not None:
+        class_labels_obj = np.asarray(class_labels_obj)[:n_obj]
+
+        # Mapping code → human-readable name
+        class_names = {
+            0: "Quasar",
+            1: "Star",
+            2: "Galaxy",
+        }
+
+        # Curated colour / marker palette
+        class_colors = {
+            0: "#E15759",   # quasar — red
+            1: "#FFD700",   # star   — gold
+            2: "#4E79A7",   # galaxy — blue
+        }
+        class_markers = {
+            0: "*",   # quasar
+            1: "o",   # star
+            2: "^",   # galaxy
+        }
+
+        plot_tsne_by_class(
+            embedding_2d=projected,
+            class_labels=class_labels_obj,
+            class_names=class_names,
+            output_directory=output_directory,
+            filename="17_tsne_colored_by_phz_class",
+            colors=class_colors,
+            markers=class_markers,
+            add_convex_hulls=False,   # set True to add translucent regions
+            title="t-SNE of CLS embeddings — coloured by PHZ classification",
+        )
+        logger.info("PLOT 17 (t-SNE by PHZ class) generated.")
+    else:
+        logger.warning(
+            "PLOT 17 skipped: 'class_labels_obj' missing from dataset_metadata."
+        )
 
     logger.info(f"All plots saved to: {output_directory}")
