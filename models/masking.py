@@ -12,8 +12,8 @@ def apply_mask_fixed(valid_mask: torch.Tensor, num_mask: int = 20):
     """
     Select masked positions and original indices kept by the encoder.
     
-    This version is fully vectorized (no for loops over batch) and handles
-    variable number of valid positions per row correctly. ???
+    This version handles variable numbers of valid positions per row,
+    including the special case num_mask=0.
 
     Args:
         valid_mask: Boolean tensor of shape (batch_size, sequence_length)
