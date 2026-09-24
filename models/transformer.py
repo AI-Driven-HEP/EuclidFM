@@ -85,7 +85,7 @@ class PhotometryTransformer(nn.Module):
         # ids_shuffle is kept in the public API for compatibility with existing
         # training code and checkpoints. Direct scatter by original indices is
         # less error-prone than scattering and applying a second permutation.
-        del mask_positions, ids_shuffle
+        del ids_shuffle
 
         encoded, valid_kept = self.embedding(
             values, band, survey, type_id, global_feat, ids_keep
@@ -99,6 +99,9 @@ class PhotometryTransformer(nn.Module):
         else:
             cls_embedding = encoded.mean(dim=1)
             encoded_measurements = encoded
+
+        if not mask_positions.any():
+            return cls_embedding
 
         encoded_measurements = self.decoder_embed(encoded_measurements)
         batch_size = values.shape[0]
