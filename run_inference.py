@@ -98,6 +98,10 @@ def main():
         validation_frame, measurements, true_class_label=with_labels
     )
 
+    if "z_vi" in validation_frame.columns:
+        redshift = validation_frame["z_vi"].to_numpy(dtype=np.float64)
+    else:
+        redshift = None
 
     if with_labels:
         (
@@ -141,6 +145,7 @@ def main():
         validation_type=validation_type,
         validation_global=validation_global,
         validation_labels=validation_labels,
+        redshift = redshift,
     )
   
 if __name__ == "__main__":
