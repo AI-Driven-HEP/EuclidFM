@@ -13,7 +13,7 @@ def apply_mask_fixed(valid_mask: torch.Tensor, num_mask: int = 20):
     Select masked positions and original indices kept by the encoder.
     
     This version is fully vectorized (no for loops over batch) and handles
-    variable number of valid positions per row correctly.
+    variable number of valid positions per row correctly. ???
 
     Args:
         valid_mask: Boolean tensor of shape (batch_size, sequence_length)
@@ -72,16 +72,21 @@ def apply_mask_fixed(valid_mask: torch.Tensor, num_mask: int = 20):
     max_masks = actual_mask_counts.max().item()
     
     if max_masks == 0:
-        # No valid positions in any row
         mask_positions = torch.zeros_like(valid_mask, dtype=torch.bool)
-        ids_keep_list = [
-            torch.empty(0, dtype=torch.long, device=device) 
-            for _ in range(batch_size)
-        ]
-        ids_shuffle_list = [
-            torch.arange(sequence_length, device=device) 
-            for _ in range(batch_size)
-        ]
+    
+        ids_keep_list = []
+        ids_shuffle_list = []
+    
+        for row in range(batch_size):
+            valid_indices = torch.where(valid_mask[row])[0]
+            invalid_indices = torch.where(~valid_mask[row])[0]
+    
+            ids_keep_list.append(valid_indices)
+    
+            ids_shuffle_list.append(
+                torch.cat([valid_indices, invalid_indices])
+            )
+    
         return mask_positions, ids_keep_list, ids_shuffle_list
     
     # Select top-k positions for masking using torch.topk
