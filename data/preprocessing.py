@@ -196,7 +196,7 @@ def apply_arcsinh(df: pd.DataFrame, flux_col: str, err_col: str):
     return flux_transformed.astype(np.float32), err_transformed.astype(np.float32), valid_mask
 
 
-def build_measurement_dataset_arcsinh(df: pd.DataFrame, measurements: list):
+def build_measurement_dataset_arcsinh(df: pd.DataFrame, measurements: list, true_class_label=False):
     """
     Build measurement arrays using plain arcsinh transformation.
     
@@ -233,8 +233,13 @@ def build_measurement_dataset_arcsinh(df: pd.DataFrame, measurements: list):
         survey_ids[:, j] = survey_vocab[m["survey"]]
         type_ids[:, j] = type_vocab[m["type"]]
     
-    return (measurement_values, measurement_mask, band_ids, survey_ids, type_ids,
-            band_vocab, survey_vocab, type_vocab)
+    if true_class_label:
+        labels = df["label"].to_numpy(dtype=np.int64)
+        return (measurement_values, measurement_mask, band_ids, survey_ids, type_ids, labels,
+                band_vocab, survey_vocab, type_vocab)
+    else:
+        return (measurement_values, measurement_mask, band_ids, survey_ids, type_ids,
+                band_vocab, survey_vocab, type_vocab)
 
 
 def extract_global_features(df: pd.DataFrame) -> np.ndarray:
