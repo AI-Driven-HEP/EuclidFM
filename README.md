@@ -24,3 +24,26 @@ The release checkpoint and run summary will be linked here. The checkpoint comes
 
 Open the [inference notebook](notebook/euclidfm_inference.ipynb) to load the checkpoint, extract CLS embeddings, and use them to train a quasar, star and galaxy classifier with either a frozen or a fine-tuned encoder. The notebook lists the labelled Platinum Sample and the working catalogue used for the examples.
 
+
+
+
+
+## Data and pretrained model
+
+The datasets and pretrained model used in EuclidFM are available for download:
+
+- **100k Working Catalogue:** [Download from Google Drive](https://drive.google.com/file/d/1khSYyTy-0g2pXlsBQGGnk8quafTcRJ3_/view?usp=sharing) — The original catalogue containing 100,000 sources from the three Euclid Deep Fields. After quality cuts, 90,258 sources are retained.
+
+- **Platinum Sample:** [Download from Google Drive](https://drive.google.com/file/d/1E1sxxm7pDyZwqe7soBRaZhJ1Yiv7lqQX/view?usp=sharing) — A labelled sample of 1,452 spectroscopically identified quasars, stars, and galaxies for downstream classification.
+
+- **Pretrained EuclidFM Checkpoint:** [Download from Google Drive](https://drive.google.com/file/d/1yCHxGV2ErNsJN2xRxb45pPzYpbFnBkSg/view?usp=sharing) — Model weights from the best validation epoch (656).
+
+## Use the pretrained encoder
+
+Download the checkpoint and save it as `models/photometry_transformer_best.pt`.
+
+Open the [inference notebook](notebook/euclidfm_inference.ipynb) to load the checkpoint, extract 128-dimensional CLS embeddings, and train a quasar, star, and galaxy classifier using either a frozen or fine-tuned encoder.
+
+
+
+
