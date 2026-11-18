@@ -82,6 +82,7 @@ def evaluate(model, dataloader, cfg):
                 mask_positions,
                 ids_keep,
                 ids_shuffle,
+                force_reconstruction=True,
             )
 
             B = len(mask_positions)

@@ -31,7 +31,9 @@ def evaluate_model(model, dataloader, device, num_mask):
             valid_mask = batch["valid_mask"].to(device)
             global_feat = batch["global_features"].to(device)
 
-            mask_positions = apply_mask_fixed(valid_mask, num_mask=num_mask)
+            mask_positions, ids_keep, ids_shuffle = apply_mask_fixed(
+                valid_mask, num_mask=num_mask
+            )
             pred, _ = model(
                 values,
                 band,
@@ -40,6 +42,9 @@ def evaluate_model(model, dataloader, device, num_mask):
                 global_feat,
                 valid_mask,
                 mask_positions,
+                ids_keep,
+                ids_shuffle,
+                force_reconstruction=True,
             )
 
             if mask_positions.any():

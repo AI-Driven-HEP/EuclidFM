@@ -70,6 +70,25 @@ class PhotometryTransformer(nn.Module):
         logger.info(f"Initialized MAE-style Photometry Transformer")
         logger.info(f"  - Use global features: {use_global_features}")
 
+    def _encode_kept(self, values, band, survey, type_id, global_feat, ids_keep):
+        encoded, valid_kept = self.embedding(
+            values, band, survey, type_id, global_feat, ids_keep
+        )
+        encoded = self.encoder(encoded, src_key_padding_mask=~valid_kept)
+        encoded = self.encoder_norm(encoded)
+
+        if self.use_cls_token:
+            return encoded[:, 0], encoded[:, 1:]
+        return encoded.mean(dim=1), encoded
+
+    def encode(self, values, band, survey, type_id, valid_mask, global_feat=None):
+        """Return one source embedding using all available measurements."""
+        ids_keep = [row.nonzero(as_tuple=True)[0] for row in valid_mask]
+        source_embedding, _ = self._encode_kept(
+            values, band, survey, type_id, global_feat, ids_keep
+        )
+        return source_embedding
+
     def forward(
         self,
         values,
@@ -81,26 +100,19 @@ class PhotometryTransformer(nn.Module):
         mask_positions,
         ids_keep,
         ids_shuffle,
+        *,
+        force_reconstruction=False,
     ):
         # ids_shuffle is kept in the public API for compatibility with existing
         # training code and checkpoints. Direct scatter by original indices is
         # less error-prone than scattering and applying a second permutation.
         del ids_shuffle
 
-        encoded, valid_kept = self.embedding(
+        cls_embedding, encoded_measurements = self._encode_kept(
             values, band, survey, type_id, global_feat, ids_keep
         )
-        encoded = self.encoder(encoded, src_key_padding_mask=~valid_kept)
-        encoded = self.encoder_norm(encoded)
-
-        if self.use_cls_token:
-            cls_embedding = encoded[:, 0]
-            encoded_measurements = encoded[:, 1:]
-        else:
-            cls_embedding = encoded.mean(dim=1)
-            encoded_measurements = encoded
-
-        if not mask_positions.any():
+        # Preserve the zero-mask inference call used by earlier notebooks.
+        if not force_reconstruction and not mask_positions.any():
             return cls_embedding
 
         encoded_measurements = self.decoder_embed(encoded_measurements)

@@ -63,6 +63,7 @@ def _run_epoch(model, dataloader, cfg, optimizer=None):
                 mask_positions,
                 ids_keep,
                 ids_shuffle,
+                force_reconstruction=True,
             )
             loss = reconstruction_loss(
                 prediction, batch["values"], mask_positions

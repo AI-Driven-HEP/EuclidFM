@@ -1,43 +1,26 @@
-# MAE-style Photometry Transformer v2
+# EuclidFM
 
-This version preserves the existing baseline v1 and adds the professional
-MAE-style checkpoint as a separate implementation.
+EuclidFM is a masked autoencoder Transformer for Euclid Q1 catalogue photometry. It learns a 128-dimensional source embedding from up to 94 flux and uncertainty pairs. The model uses an eight-layer encoder and a four-layer reconstruction decoder.
 
-## Architectural difference
+## Pretrain
 
-- **v1:** BERT-style masking. Mask tokens remain in the encoder input.
-- **v2:** MAE-style masking. Masked measurements are removed before the encoder,
-  then mask tokens are inserted and the original sequence order is restored for
-  the Transformer decoder.
-
-## New v2 files
-
-- `config_v2.py`
-- `models/masking_v2.py`
-- `models/embedding_v2.py`
-- `models/transformer_v2.py`
-- `training/trainer_v2.py`
-- `training/evaluator_v2.py`
-- `visualize_v2.py`
-- `scripts/run_training_v2.py`
-
-No existing v1 Python file is replaced.
-
-## Run v2
-
-Place `euclid_random_100k_even_3fields_all_features.csv` in the repository root,
-install the dependencies, and run:
+Install the dependencies in the repository root.
 
 ```bash
 pip install -r requirements.txt
-python scripts/run_training_v2.py
 ```
 
-The default v2 configuration matches the checkpoint: 10,000 sampled objects,
-80/20 train-validation split, `d_model=64`, 4 attention heads, 8 encoder
-layers, 4 decoder layers, batch size 8, learning rate `3e-4`, weight decay
-`0.01`, 100 epochs, and 20 masked valid measurements per object.
+Download the original 100k working catalogue described in the [inference notebook](notebook/euclidfm_inference.ipynb). In a fresh checkout, save it at the repository root as `euclid_random_100k_even_3fields_all_features.csv`, then run:
 
-Generated v2 checkpoints, models, evaluation tables, logs, and plots use
-separate `_v2` directories and do not overwrite v1 outputs.
+```bash
+python main.py --batch-size 64 --epochs 1000 --no-global
+```
+
+These are the settings for the long run that passed epoch 900. The quality cuts leave 90,258 sources. The seed-42 split assigns 72,206 sources to training and 18,052 to validation, grouped by object ID. Each training sample masks up to 20 valid measurements. The script writes the best validation checkpoint to `models/photometry_transformer_best.pt`.
+
+## Use the pretrained encoder
+
+The release checkpoint and run summary will be linked here. The checkpoint comes from the long run and records its best validation epoch, 656.
+
+Open the [inference notebook](notebook/euclidfm_inference.ipynb) to load the checkpoint, extract CLS embeddings, and use them to train a quasar, star and galaxy classifier with either a frozen or a fine-tuned encoder. The notebook lists the labelled Platinum Sample and the working catalogue used for the examples.
 
